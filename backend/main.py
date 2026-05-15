@@ -1,12 +1,22 @@
 import json
-import sqlite3
+import os
 import uuid
+from contextlib import contextmanager
 from datetime import datetime
-from typing import List, Optional
+from typing import Generator, List, Optional
 
+import psycopg2
+import psycopg2.extras
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
+
+DATABASE_URL = os.environ.get("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL environment variable is not set")
+
+VALID_GYRO_TYPES = {"classic", "chicken", "pork", "mixed", "veggie"}
+VALID_SIDES      = {"fries", "greek_salad", "rice", "extra_tzatziki", "pita"}
 
 app = FastAPI(title="Gyro Order API", version="1.0.0")
 
@@ -17,34 +27,39 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-DATABASE = "orders.db"
-
-VALID_GYRO_TYPES = {"classic", "chicken", "pork", "mixed", "veggie"}
-VALID_SIDES = {"fries", "greek_salad", "rice", "extra_tzatziki", "pita"}
-
 
 # ── Database ──────────────────────────────────────────────────────────────────
 
-def get_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DATABASE)
-    conn.row_factory = sqlite3.Row
-    return conn
+@contextmanager
+def get_db() -> Generator[psycopg2.extensions.connection, None, None]:
+    """Open a connection, yield it, commit on success or rollback on error."""
+    conn = psycopg2.connect(
+        DATABASE_URL,
+        cursor_factory=psycopg2.extras.RealDictCursor,
+    )
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def init_db() -> None:
-    conn = get_db()
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS orders (
-            id          TEXT PRIMARY KEY,
-            name        TEXT NOT NULL,
-            gyro_type   TEXT NOT NULL,
-            sides       TEXT NOT NULL,
-            notes       TEXT,
-            created_at  TEXT NOT NULL
-        )
-    """)
-    conn.commit()
-    conn.close()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS orders (
+                    id          TEXT PRIMARY KEY,
+                    name        TEXT NOT NULL,
+                    gyro_type   TEXT NOT NULL,
+                    sides       TEXT NOT NULL,
+                    notes       TEXT,
+                    created_at  TEXT NOT NULL
+                )
+            """)
 
 
 init_db()
@@ -81,7 +96,7 @@ class OrderCreate(BaseModel):
         invalid = set(v) - VALID_SIDES
         if invalid:
             raise ValueError(f"Invalid sides: {invalid}")
-        return list(set(v))  # deduplicate
+        return list(set(v))
 
     @field_validator("notes")
     @classmethod
@@ -110,16 +125,18 @@ def health():
 
 @app.post("/orders", response_model=Order, status_code=201)
 def create_order(payload: OrderCreate):
-    order_id = str(uuid.uuid4())[:8]
+    order_id   = str(uuid.uuid4())[:8]
     created_at = datetime.utcnow().isoformat() + "Z"
-    conn = get_db()
-    conn.execute(
-        "INSERT INTO orders VALUES (?, ?, ?, ?, ?, ?)",
-        (order_id, payload.name, payload.gyro_type,
-         json.dumps(payload.sides), payload.notes, created_at),
-    )
-    conn.commit()
-    conn.close()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO orders (id, name, gyro_type, sides, notes, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (order_id, payload.name, payload.gyro_type,
+                 json.dumps(payload.sides), payload.notes, created_at),
+            )
     return Order(
         id=order_id,
         name=payload.name,
@@ -132,11 +149,10 @@ def create_order(payload: OrderCreate):
 
 @app.get("/orders", response_model=List[Order])
 def list_orders():
-    conn = get_db()
-    rows = conn.execute(
-        "SELECT * FROM orders ORDER BY created_at DESC"
-    ).fetchall()
-    conn.close()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM orders ORDER BY created_at DESC")
+            rows = cur.fetchall()
     return [
         Order(
             id=r["id"],
@@ -152,17 +168,15 @@ def list_orders():
 
 @app.delete("/orders/{order_id}", status_code=204)
 def delete_order(order_id: str):
-    conn = get_db()
-    result = conn.execute("DELETE FROM orders WHERE id = ?", (order_id,))
-    conn.commit()
-    conn.close()
-    if result.rowcount == 0:
-        raise HTTPException(status_code=404, detail="Order not found")
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM orders WHERE id = %s", (order_id,))
+            if cur.rowcount == 0:
+                raise HTTPException(status_code=404, detail="Order not found")
 
 
 @app.delete("/orders", status_code=204)
 def clear_orders():
-    conn = get_db()
-    conn.execute("DELETE FROM orders")
-    conn.commit()
-    conn.close()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM orders")
