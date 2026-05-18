@@ -15,8 +15,9 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL environment variable is not set")
 
-VALID_GYRO_TYPES = {"classic", "chicken", "pork", "mixed", "veggie"}
-VALID_SIDES      = {"fries", "greek_salad", "rice", "extra_tzatziki", "pita"}
+VALID_GYRO_TYPES = {"chicken", "pork", "mixed"}
+VALID_SIDES      = {"tzatziki", "tomato", "onions", "salad", "ketchup", "mayo", "mustard"}
+VALID_SIZES      = {"small", "big", "box"}
 
 app = FastAPI(title="Gyro Order API", version="1.0.0")
 
@@ -32,7 +33,6 @@ app.add_middleware(
 
 @contextmanager
 def get_db() -> Generator[psycopg2.extensions.connection, None, None]:
-    """Open a connection, yield it, commit on success or rollback on error."""
     conn = psycopg2.connect(
         DATABASE_URL,
         cursor_factory=psycopg2.extras.RealDictCursor,
@@ -55,10 +55,15 @@ def init_db() -> None:
                     id          TEXT PRIMARY KEY,
                     name        TEXT NOT NULL,
                     gyro_type   TEXT NOT NULL,
+                    size        TEXT NOT NULL DEFAULT 'big',
                     sides       TEXT NOT NULL,
                     notes       TEXT,
                     created_at  TEXT NOT NULL
                 )
+            """)
+            # Migration: add size column to existing tables
+            cur.execute("""
+                ALTER TABLE orders ADD COLUMN IF NOT EXISTS size TEXT NOT NULL DEFAULT 'big'
             """)
 
 
@@ -70,6 +75,7 @@ init_db()
 class OrderCreate(BaseModel):
     name: str
     gyro_type: str
+    size: str
     sides: List[str]
     notes: Optional[str] = None
 
@@ -88,6 +94,13 @@ class OrderCreate(BaseModel):
     def valid_gyro(cls, v: str) -> str:
         if v not in VALID_GYRO_TYPES:
             raise ValueError(f"gyro_type must be one of {sorted(VALID_GYRO_TYPES)}")
+        return v
+
+    @field_validator("size")
+    @classmethod
+    def valid_size(cls, v: str) -> str:
+        if v not in VALID_SIZES:
+            raise ValueError(f"size must be one of {sorted(VALID_SIZES)}")
         return v
 
     @field_validator("sides")
@@ -111,9 +124,24 @@ class Order(BaseModel):
     id: str
     name: str
     gyro_type: str
+    size: str
     sides: List[str]
     notes: Optional[str]
     created_at: str
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def row_to_order(r: dict) -> Order:
+    return Order(
+        id=r["id"],
+        name=r["name"],
+        gyro_type=r["gyro_type"],
+        size=r["size"],
+        sides=json.loads(r["sides"]),
+        notes=r["notes"],
+        created_at=r["created_at"],
+    )
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -131,20 +159,41 @@ def create_order(payload: OrderCreate):
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO orders (id, name, gyro_type, sides, notes, created_at)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                INSERT INTO orders (id, name, gyro_type, size, sides, notes, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """,
-                (order_id, payload.name, payload.gyro_type,
+                (order_id, payload.name, payload.gyro_type, payload.size,
                  json.dumps(payload.sides), payload.notes, created_at),
             )
     return Order(
         id=order_id,
         name=payload.name,
         gyro_type=payload.gyro_type,
+        size=payload.size,
         sides=payload.sides,
         notes=payload.notes,
         created_at=created_at,
     )
+
+
+@app.put("/orders/{order_id}", response_model=Order)
+def update_order(order_id: str, payload: OrderCreate):
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE orders
+                SET name=%s, gyro_type=%s, size=%s, sides=%s, notes=%s
+                WHERE id=%s
+                """,
+                (payload.name, payload.gyro_type, payload.size,
+                 json.dumps(payload.sides), payload.notes, order_id),
+            )
+            if cur.rowcount == 0:
+                raise HTTPException(status_code=404, detail="Order not found")
+            cur.execute("SELECT * FROM orders WHERE id = %s", (order_id,))
+            row = cur.fetchone()
+    return row_to_order(row)
 
 
 @app.get("/orders", response_model=List[Order])
@@ -153,17 +202,7 @@ def list_orders():
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM orders ORDER BY created_at DESC")
             rows = cur.fetchall()
-    return [
-        Order(
-            id=r["id"],
-            name=r["name"],
-            gyro_type=r["gyro_type"],
-            sides=json.loads(r["sides"]),
-            notes=r["notes"],
-            created_at=r["created_at"],
-        )
-        for r in rows
-    ]
+    return [row_to_order(r) for r in rows]
 
 
 @app.delete("/orders/{order_id}", status_code=204)

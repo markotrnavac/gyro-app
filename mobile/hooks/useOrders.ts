@@ -6,6 +6,7 @@ export interface Order {
   id: string;
   name: string;
   gyro_type: string;
+  size: string;
   sides: string[];
   notes?: string | null;
   created_at: string;
@@ -14,6 +15,7 @@ export interface Order {
 export interface OrderInput {
   name: string;
   gyro_type: string;
+  size: string;
   sides: string[];
   notes?: string;
 }
@@ -34,12 +36,10 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-/** Persist orders to AsyncStorage (fire-and-forget). */
 function persist(orders: Order[]): void {
   AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(orders)).catch(() => {});
 }
 
-/** Read orders from AsyncStorage. Returns [] on error. */
 async function readLocal(): Promise<Order[]> {
   try {
     const raw = await AsyncStorage.getItem(STORAGE_KEY);
@@ -52,7 +52,7 @@ async function readLocal(): Promise<Order[]> {
 export function useOrders() {
   const [orders,  setOrders]  = useState<Order[]>([]);
   const [loading, setLoading] = useState(true);
-  const [synced,  setSynced]  = useState(false); // true = API responded
+  const [synced,  setSynced]  = useState(false);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -62,7 +62,6 @@ export function useOrders() {
       persist(data);
       setSynced(true);
     } catch {
-      // API unreachable — fall back to local cache
       const local = await readLocal();
       setOrders(local);
       setSynced(false);
@@ -87,7 +86,6 @@ export function useOrders() {
       });
       return order;
     } catch {
-      // Offline fallback — generate a local order
       const order: Order = {
         id: Math.random().toString(36).slice(2, 10),
         ...input,
@@ -103,8 +101,36 @@ export function useOrders() {
     }
   }, []);
 
+  const updateOrder = useCallback(async (id: string, input: OrderInput): Promise<Order> => {
+    try {
+      const order = await apiFetch<Order>(`/orders/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(input),
+      });
+      setOrders(prev => {
+        const next = prev.map(o => o.id === id ? order : o);
+        persist(next);
+        return next;
+      });
+      return order;
+    } catch {
+      setOrders(prev => {
+        const existing = prev.find(o => o.id === id);
+        const updated: Order = {
+          ...(existing ?? { id, created_at: new Date().toISOString() }),
+          ...input,
+          notes: input.notes ?? null,
+        };
+        const next = prev.map(o => o.id === id ? updated : o);
+        persist(next);
+        return next;
+      });
+      return { id, ...input, notes: input.notes ?? null, created_at: new Date().toISOString() };
+    }
+  }, []);
+
   const deleteOrder = useCallback(async (id: string) => {
-    // Optimistic remove
     setOrders(prev => {
       const next = prev.filter(o => o.id !== id);
       persist(next);
@@ -123,5 +149,5 @@ export function useOrders() {
     } catch {}
   }, []);
 
-  return { orders, loading, synced, submitOrder, deleteOrder, clearAll, refresh };
+  return { orders, loading, synced, submitOrder, updateOrder, deleteOrder, clearAll, refresh };
 }
