@@ -1,6 +1,6 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { router } from "expo-router";
-import { useEffect, useState } from "react";
+import { router, useFocusEffect } from "expo-router";
+import { useCallback, useEffect, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -25,6 +25,12 @@ export default function OrdersScreen() {
   useEffect(() => {
     AsyncStorage.getItem(NAME_KEY).then(v => setMyName(v)).catch(() => {});
   }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      refresh();
+    }, [refresh])
+  );
 
   function confirmDelete(order: Order) {
     Alert.alert(
