@@ -37,6 +37,9 @@ export default function OrderScreen() {
   const scrollRef = useRef<ScrollView>(null);
 
   useEffect(() => {
+    const validGyroIds = new Set(GYRO_TYPES.map(g => g.id));
+    const validSideIds = new Set(SIDES.map(s => s.id));
+
     Promise.all([
       AsyncStorage.getItem(NAME_KEY),
       AsyncStorage.getItem(MY_ORDER_KEY),
@@ -44,10 +47,15 @@ export default function OrderScreen() {
       if (savedName) setName(savedName);
       if (savedOrder) {
         const order: Order = JSON.parse(savedOrder);
+        // If the stored order has an outdated menu item, discard it
+        if (!validGyroIds.has(order.gyro_type)) {
+          AsyncStorage.removeItem(MY_ORDER_KEY).catch(() => {});
+          return;
+        }
         setMyOrder(order);
         setGyroType(order.gyro_type);
-        setSize(order.size);
-        setSelectedSides(new Set(order.sides));
+        setSize(order.size ?? "big");
+        setSelectedSides(new Set(order.sides.filter(s => validSideIds.has(s))));
         setNotes(order.notes ?? "");
         setIsEditing(true);
       }
@@ -86,7 +94,13 @@ export default function OrderScreen() {
 
     let result: Order;
     if (myOrder && isEditing) {
-      result = await updateOrder(myOrder.id, input);
+      try {
+        result = await updateOrder(myOrder.id, input);
+      } catch {
+        // Server rejected the update (order not found or menu changed) — create new
+        await AsyncStorage.removeItem(MY_ORDER_KEY);
+        result = await submitOrder(input);
+      }
     } else {
       result = await submitOrder(input);
     }

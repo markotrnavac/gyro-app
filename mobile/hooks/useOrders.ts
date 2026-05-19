@@ -116,7 +116,12 @@ export function useOrders() {
         return next;
       });
       return order;
-    } catch {
+    } catch (err) {
+      // Network/timeout errors → update locally as offline fallback
+      // Server errors (404, 422) → rethrow so caller can create a new order
+      const isNetworkError = err instanceof TypeError || (err instanceof Error && err.name === "AbortError");
+      if (!isNetworkError) throw err;
+
       setOrders(prev => {
         const existing = prev.find(o => o.id === id);
         const updated: Order = {
