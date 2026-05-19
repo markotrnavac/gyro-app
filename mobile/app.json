@@ -25,7 +25,7 @@
         "backgroundColor": "#4f46e5"
       },
       "package": "com.team.gyroapp",
-      "versionCode": 2,
+      "versionCode": 3,
       "permissions": []
     },
     "web": {
